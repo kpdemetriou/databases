@@ -438,33 +438,41 @@ async def test_transaction_commit_serializable(database_url):
     if database_url.scheme != "postgresql":
         pytest.skip("Test (currently) only supports asyncpg")
 
-    def insert_independently():
-        engine = sqlalchemy.create_engine(str(database_url))
-        conn = engine.connect()
+    async def insert_concurrently(event):
+        async with Database(database_url) as database:
+            async with database.transaction():
+                query = notes.insert().values(text="example1", completed=True)
+                await database.execute(query)
 
-        query = notes.insert().values(text="example1", completed=True)
-        conn.execute(query)
+        event.set()
 
-    def delete_independently():
-        engine = sqlalchemy.create_engine(str(database_url))
-        conn = engine.connect()
+    async def delete_concurrently(event):
+        async with Database(database_url) as database:
+            async with database.transaction():
+                query = notes.delete()
+                await database.execute(query)
 
-        query = notes.delete()
-        conn.execute(query)
+        event.set()
 
     async with Database(database_url) as database:
-        async with database.transaction(force_rollback=True, isolation="serializable"):
+        async with database.transaction(
+            force_rollback=True, isolation="repeatable_read"
+        ):
             query = notes.select()
             results = await database.fetch_all(query=query)
             assert len(results) == 0
 
-            insert_independently()
+            event = asyncio.Event()
+            asyncio.create_task(insert_concurrently(event))
+            await event.wait()
 
             query = notes.select()
             results = await database.fetch_all(query=query)
             assert len(results) == 0
 
-            delete_independently()
+            event = asyncio.Event()
+            asyncio.create_task(delete_concurrently(event))
+            await event.wait()
 
 
 @pytest.mark.parametrize("database_url", DATABASE_URLS)
